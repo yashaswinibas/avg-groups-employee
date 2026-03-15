@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:clean": "node kill-port.js && npm run dev",
     "build": "vite build",
     "start": "tsx server.ts",
     "preview": "vite preview",

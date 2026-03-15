@@ -6,23 +6,14 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Enhanced PostgreSQL connection with Railway support
+// Replace the pool configuration in server.ts with this:
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // Fallback for individual variables if DATABASE_URL is not provided
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  // SSL configuration for Railway (requires SSL)
-  ssl: process.env.NODE_ENV === 'production' ? {
-    rejectUnauthorized: false // Required for Railway's self-signed certificates
-  } : false,
-  // Connection pool settings for better performance
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  host: 'aws-1-ap-southeast-1.pooler.supabase.com',
+  port: 5432,
+  user: 'postgres.vibxpfshilsapubpscmb',
+  password: 'employee@123@456',
+  database: 'postgres',
+  ssl: false
 });
 
 // Test database connection with retry logic
@@ -31,6 +22,11 @@ async function testDatabaseConnection(retries = 3): Promise<boolean> {
     try {
       const client = await pool.connect();
       console.log(`✅ Database connection attempt ${i + 1}: SUCCESS`);
+      
+      // Test the connection with a simple query
+      const result = await client.query('SELECT NOW() as current_time');
+      console.log(`📅 Database time: ${result.rows[0].current_time}`);
+      
       client.release();
       return true;
     } catch (err) {
@@ -45,7 +41,8 @@ async function testDatabaseConnection(retries = 3): Promise<boolean> {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3000; // Railway provides PORT env variable
+const DEFAULT_PORT = 3000;
+const PORT = process.env.PORT || DEFAULT_PORT;
 
 app.use(express.json());
 
@@ -119,16 +116,9 @@ if (!dbUrl && !dbHost) {
   console.warn('\n' + '='.repeat(50));
   console.warn('⚠️  DATABASE NOT CONFIGURED');
   console.warn('Running in DEMO MODE with in-memory data.');
-  console.warn('To connect PostgreSQL on Railway:');
-  console.warn('1. Go to Railway dashboard');
-  console.warn('2. Copy your DATABASE_URL');
-  console.warn('3. Add it to your environment variables');
-  console.warn('='.repeat(50) + '\n');
-} else if (dbHost === 'host' || dbHost === 'base' || (dbUrl && (dbUrl.includes('@host') || dbUrl.includes('@base')))) {
-  console.warn('\n' + '='.repeat(50));
-  console.warn('⚠️  PLACEHOLDER DATABASE DETECTED');
-  console.warn('Running in DEMO MODE.');
-  console.warn('Please provide a real DATABASE_URL in Settings.');
+  console.warn('To connect to Supabase PostgreSQL:');
+  console.warn('1. Copy your Supabase connection string');
+  console.warn('2. Add it to your .env file as DATABASE_URL');
   console.warn('='.repeat(50) + '\n');
 } else {
   // Test the connection
@@ -141,7 +131,10 @@ if (!dbUrl && !dbHost) {
       console.warn('\n' + '='.repeat(50));
       console.warn('⚠️  DATABASE CONNECTION FAILED');
       console.warn('Running in DEMO MODE with in-memory data.');
-      console.warn('Please check your Railway database credentials.');
+      console.warn('Please check your Supabase credentials:');
+      console.warn('- Verify DATABASE_URL is correct');
+      console.warn('- Ensure Supabase project is active');
+      console.warn('- Check if IP is allowed (if IP restrictions enabled)');
       console.warn('='.repeat(50) + '\n');
     }
   });
@@ -245,11 +238,13 @@ async function initializeDatabase() {
           ON CONFLICT (id) DO NOTHING
         `, [b.id, b.name, b.bm_name, b.total_collection]);
       }
+      
+      console.log('✅ Seed data inserted successfully');
     }
 
     console.log('\n' + '='.repeat(50));
-    console.log('✅ RAILWAY POSTGRESQL CONNECTED SUCCESSFULLY');
-    console.log('Application is now using your production database on Railway.');
+    console.log('✅ SUPABASE POSTGRESQL CONNECTED SUCCESSFULLY');
+    console.log('Application is now using your production database on Supabase.');
     console.log('='.repeat(50) + '\n');
   } catch (err) {
     console.error('\n' + '='.repeat(50));
@@ -265,7 +260,24 @@ async function initializeDatabase() {
 app.get('/api/health', async (req, res) => {
   const dbConfigured = !!(dbUrl || dbHost);
   let dbConnected = isDbConnected;
-  res.json({ dbConfigured, dbConnected });
+  
+  // If connected, do a quick ping to verify
+  if (dbConnected) {
+    try {
+      await pool.query('SELECT 1');
+    } catch (err) {
+      dbConnected = false;
+      isDbConnected = false;
+    }
+  }
+  
+  res.json({ 
+    status: 'ok', 
+    dbConfigured, 
+    dbConnected,
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -340,7 +352,7 @@ app.post('/api/auth/register', async (req, res) => {
 app.get('/api/users', async (req, res) => {
   try {
     if (isDbConnected) {
-      const result = await pool.query('SELECT * FROM users');
+      const result = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
       res.json(result.rows);
     } else {
       res.json(memoryStore.users);
@@ -656,13 +668,53 @@ app.post('/api/visits', async (req, res) => {
   }
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  // Only run Vite middleware in development
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa',
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Received SIGINT. Closing database pool...');
+  await pool.end();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('Received SIGTERM. Closing database pool...');
+  await pool.end();
+  process.exit(0);
+});
+
+// Function to find an available port - UPDATED VERSION (no require)
+async function findAvailablePort(startPort: number): Promise<number> {
+  const { createServer } = await import('http');
+  
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    
+    server.listen(startPort, '0.0.0.0', () => {
+      server.close(() => {
+        resolve(startPort);
+      });
+    });
+    
+    server.on('error', (err: any) => {
+      if (err.code === 'EADDRINUSE') {
+        // Port is in use, try the next one
+        resolve(findAvailablePort(startPort + 1));
+      } else {
+        reject(err);
+      }
+    });
   });
-  app.use(vite.middlewares);
+}
+
+// Vite middleware setup (only in development)
+if (process.env.NODE_ENV !== 'production') {
+  // This needs to be inside an async function since createViteServer returns a promise
+  (async () => {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  })();
 } else {
   const distPath = path.join(process.cwd(), 'dist');
   app.use(express.static(distPath));
@@ -673,8 +725,18 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Only start the server if not in Vercel environment
 if (process.env.VERCEL !== '1') {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  findAvailablePort(Number(PORT)).then(availablePort => {
+    app.listen(availablePort, '0.0.0.0', () => {
+      console.log(`Server running on http://localhost:${availablePort}`);
+      console.log(`Health check: http://localhost:${availablePort}/api/health`);
+      
+      if (availablePort !== Number(PORT)) {
+        console.log(`Note: Port ${PORT} was in use, using port ${availablePort} instead`);
+      }
+    });
+  }).catch(err => {
+    console.error('Failed to find available port:', err);
+    process.exit(1);
   });
 }
 

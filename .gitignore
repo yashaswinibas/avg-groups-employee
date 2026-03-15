@@ -1,40 +1,30 @@
-# Node.js / Backend
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Dependencies
 node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+*.local
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.env
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
-
-# Logs
-logs
-*.log
-pids
-*.pid
-*.seed
-*.sqlite
-
-# Build folders
-build/
-dist/
-
-# OS files
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# IDE / Editor
-.vscode/
-.idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
-
-# React / Frontend
-*.env.local
-*.env.development.local
-*.env.test.local
-*.env.production.local
-.cache/
-coverage/
+*.sw?

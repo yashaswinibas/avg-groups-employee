@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react'
 import { 
   Users, 
   LayoutDashboard, 
@@ -101,9 +101,9 @@ const ROLES: Role[] = ['MD', 'Director', 'GM', 'Branch Manager', 'ABM', 'Sales O
 const ROLE_PERMISSIONS: Record<Role, Role[]> = {
   'MD': ['Director', 'GM', 'Branch Manager', 'ABM', 'Sales Officer', 'Client'],
   'Director': ['GM', 'Branch Manager', 'ABM', 'Sales Officer', 'Client'],
-  'GM': [],
-  'Branch Manager': [],
-  'ABM': ['Sales Officer'],
+  'GM': ['Branch Manager', 'ABM', 'Sales Officer', 'Client'],
+  'Branch Manager': ['ABM', 'Sales Officer', 'Client'],
+  'ABM': ['Sales Officer', 'Client'],
   'Sales Officer': ['Client'],
   'Client': []
 };
@@ -198,7 +198,6 @@ export default function App() {
     const ref = params.get('ref');
     if (ref) {
       setReferralFromUrl(ref);
-      // Stay on login page but show the referral badge
     }
   }, []);
 
@@ -505,7 +504,7 @@ export default function App() {
     <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden">
       <div className="p-6 border-b border-slate-100 flex justify-between items-center">
         <h2 className="text-xl font-bold text-slate-900">Organizational Hierarchy</h2>
-        {ROLE_PERMISSIONS[user.role].length > 0 && (
+        {ROLE_PERMISSIONS[user.role]?.length > 0 && (
           <button 
             onClick={() => { setModalType('user'); setShowAddModal(true); }}
             className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-bold flex items-center space-x-2 hover:bg-indigo-700 transition-all"
@@ -1127,7 +1126,7 @@ export default function App() {
                       <div className="space-y-1">
                         <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Role</label>
                         <select name="role" defaultValue={editingItem?.role} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none">
-                          {ROLE_PERMISSIONS[user.role].map(r => <option key={r} value={r}>{r}</option>)}
+                          {ROLE_PERMISSIONS[user.role]?.map(r => <option key={r} value={r}>{r}</option>)}
                         </select>
                       </div>
                     </div>
