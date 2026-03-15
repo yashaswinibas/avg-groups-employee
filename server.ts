@@ -6,14 +6,25 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // Fallback for individual variables if needed
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
+// Main database connection
+const mainPool = new Pool({
+  connectionString: process.env.MAIN_DATABASE_URL,
+  host: process.env.MAIN_DB_HOST,
+  port: parseInt(process.env.MAIN_DB_PORT || '5432'),
+  user: process.env.MAIN_DB_USER,
+  password: process.env.MAIN_DB_PASSWORD,
+  database: process.env.MAIN_DB_NAME,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Subsidiary database connection
+const subsidiaryPool = new Pool({
+  connectionString: process.env.SUBSIDIARY_DATABASE_URL,
+  host: process.env.SUBSIDIARY_DB_HOST,
+  port: parseInt(process.env.SUBSIDIARY_DB_PORT || '5432'),
+  user: process.env.SUBSIDIARY_DB_USER,
+  password: process.env.SUBSIDIARY_DB_PASSWORD,
+  database: process.env.SUBSIDIARY_DB_NAME,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
@@ -23,10 +34,13 @@ async function startServer() {
 
   app.use(express.json());
 
-  // Initialize Database
-  const dbUrl = process.env.DATABASE_URL;
-  const dbHost = process.env.DB_HOST;
-  let isDbConnected = false;
+  // Initialize Databases
+  const mainDbUrl = process.env.MAIN_DATABASE_URL;
+  const mainDbHost = process.env.MAIN_DB_HOST;
+  const subsidiaryDbUrl = process.env.SUBSIDIARY_DATABASE_URL;
+  
+  let isMainDbConnected = false;
+  let isSubsidiaryDbConnected = false;
 
   // In-memory store for fallback
   let memoryStore: any = {
@@ -34,7 +48,8 @@ async function startServer() {
     projects: [],
     money_tracking: [],
     client_visits: [],
-    branches: []
+    branches: [],
+    subsidiary_data: [] // New for subsidiary data
   };
 
   const seedUsers = [
@@ -83,27 +98,29 @@ async function startServer() {
     { id: 'b7', name: 'VILLUPURAM', bm_name: 'MURUGAN', total_collection: 1478000 },
   ];
 
+  // Seed data for subsidiary database
+  const seedSubsidiaryData = [
+    { id: 's1', name: 'Subsidiary Branch 1', location: 'Chennai', revenue: 1500000, expenses: 800000, profit: 700000 },
+    { id: 's2', name: 'Subsidiary Branch 2', location: 'Coimbatore', revenue: 1200000, expenses: 600000, profit: 600000 },
+    { id: 's3', name: 'Subsidiary Branch 3', location: 'Madurai', revenue: 900000, expenses: 450000, profit: 450000 },
+  ];
+
   // Initialize memory store
   memoryStore.users = [...seedUsers];
   memoryStore.projects = [...seedProjects];
   memoryStore.branches = [...seedBranches];
+  memoryStore.subsidiary_data = [...seedSubsidiaryData];
 
-  if (!dbUrl && !dbHost) {
+  // Connect to Main Database
+  if (!mainDbUrl && !mainDbHost) {
     console.warn('\n' + '='.repeat(50));
-    console.warn('⚠️  DATABASE NOT CONFIGURED');
-    console.warn('Running in DEMO MODE with in-memory data.');
-    console.warn('To connect PostgreSQL: Add DATABASE_URL in Settings.');
-    console.warn('='.repeat(50) + '\n');
-  } else if (dbHost === 'host' || dbHost === 'base' || (dbUrl && (dbUrl.includes('@host') || dbUrl.includes('@base')))) {
-    console.warn('\n' + '='.repeat(50));
-    console.warn('⚠️  PLACEHOLDER DATABASE DETECTED');
-    console.warn('Running in DEMO MODE.');
-    console.warn('Please provide a real DATABASE_URL in Settings.');
+    console.warn('⚠️  MAIN DATABASE NOT CONFIGURED');
+    console.warn('Running main app in DEMO MODE with in-memory data.');
     console.warn('='.repeat(50) + '\n');
   } else {
     try {
-      console.log(`🔌 Connecting to PostgreSQL...`);
-      await pool.query(`
+      console.log(`🔌 Connecting to Main PostgreSQL...`);
+      await mainPool.query(`
         CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -156,7 +173,7 @@ async function startServer() {
       `);
 
       for (const u of seedUsers) {
-        await pool.query(`
+        await mainPool.query(`
           INSERT INTO users (id, name, email, password, role, aadhar, phone, referral_code, referred_by, parent_id)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
           ON CONFLICT (id) DO NOTHING
@@ -164,7 +181,7 @@ async function startServer() {
       }
 
       for (const p of seedProjects) {
-        await pool.query(`
+        await mainPool.query(`
           INSERT INTO projects (id, title, description, category, budget)
           VALUES ($1, $2, $3, $4, $5)
           ON CONFLICT (id) DO NOTHING
@@ -172,43 +189,107 @@ async function startServer() {
       }
 
       for (const b of seedBranches) {
-        await pool.query(`
+        await mainPool.query(`
           INSERT INTO branches (id, name, bm_name, total_collection)
           VALUES ($1, $2, $3, $4)
           ON CONFLICT (id) DO NOTHING
         `, [b.id, b.name, b.bm_name, b.total_collection]);
       }
-      isDbConnected = true;
+      isMainDbConnected = true;
       console.log('\n' + '='.repeat(50));
-      console.log('✅ POSTGRESQL CONNECTED SUCCESSFULLY');
-      console.log('Application is now using your live database.');
+      console.log('✅ MAIN DATABASE CONNECTED SUCCESSFULLY');
       console.log('='.repeat(50) + '\n');
     } catch (err) {
       console.error('\n' + '='.repeat(50));
-      console.error('❌ DATABASE CONNECTION FAILED');
-      console.error('Falling back to DEMO MODE.');
+      console.error('❌ MAIN DATABASE CONNECTION FAILED');
+      console.error('Falling back to DEMO MODE for main app.');
       console.error('Error:', err instanceof Error ? err.message : err);
       console.error('='.repeat(50) + '\n');
     }
   }
 
-  // API Routes
+  // Connect to Subsidiary Database
+  if (!subsidiaryDbUrl && !process.env.SUBSIDIARY_DB_HOST) {
+    console.warn('\n' + '='.repeat(50));
+    console.warn('⚠️  SUBSIDIARY DATABASE NOT CONFIGURED');
+    console.warn('Running subsidiary features in DEMO MODE with in-memory data.');
+    console.warn('='.repeat(50) + '\n');
+  } else {
+    try {
+      console.log(`🔌 Connecting to Subsidiary PostgreSQL...`);
+      await subsidiaryPool.query(`
+        CREATE TABLE IF NOT EXISTS subsidiary_branches (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          location TEXT,
+          revenue REAL DEFAULT 0,
+          expenses REAL DEFAULT 0,
+          profit REAL DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS subsidiary_transactions (
+          id TEXT PRIMARY KEY,
+          branch_id TEXT NOT NULL,
+          amount REAL NOT NULL,
+          type TEXT NOT NULL,
+          description TEXT,
+          date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS subsidiary_employees (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          position TEXT NOT NULL,
+          branch_id TEXT NOT NULL,
+          salary REAL DEFAULT 0,
+          joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
+      for (const s of seedSubsidiaryData) {
+        await subsidiaryPool.query(`
+          INSERT INTO subsidiary_branches (id, name, location, revenue, expenses, profit)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (id) DO NOTHING
+        `, [s.id, s.name, s.location, s.revenue, s.expenses, s.profit]);
+      }
+
+      isSubsidiaryDbConnected = true;
+      console.log('\n' + '='.repeat(50));
+      console.log('✅ SUBSIDIARY DATABASE CONNECTED SUCCESSFULLY');
+      console.log('='.repeat(50) + '\n');
+    } catch (err) {
+      console.error('\n' + '='.repeat(50));
+      console.error('❌ SUBSIDIARY DATABASE CONNECTION FAILED');
+      console.error('Falling back to DEMO MODE for subsidiary features.');
+      console.error('Error:', err instanceof Error ? err.message : err);
+      console.error('='.repeat(50) + '\n');
+    }
+  }
+
+  // API Routes for Main Database (existing routes modified to use mainPool)
   app.get('/api/health', async (req, res) => {
-    const dbConfigured = !!(dbUrl || dbHost);
-    let dbConnected = isDbConnected;
-    res.json({ dbConfigured, dbConnected });
+    const mainDbConfigured = !!(mainDbUrl || mainDbHost);
+    const subsidiaryDbConfigured = !!(subsidiaryDbUrl || process.env.SUBSIDIARY_DB_HOST);
+    res.json({ 
+      mainDbConfigured, 
+      mainDbConnected: isMainDbConnected,
+      subsidiaryDbConfigured,
+      subsidiaryDbConnected: isSubsidiaryDbConnected 
+    });
   });
 
   app.post('/api/auth/login', async (req, res) => {
     const { email, password, aadhar } = req.body;
     
     try {
-      if (isDbConnected) {
+      if (isMainDbConnected) {
         let result;
         if (aadhar) {
-          result = await pool.query('SELECT * FROM users WHERE aadhar = $1 AND password = $2', [aadhar, password]);
+          result = await mainPool.query('SELECT * FROM users WHERE aadhar = $1 AND password = $2', [aadhar, password]);
         } else {
-          result = await pool.query('SELECT * FROM users WHERE email = $1 AND password = $2', [email, password]);
+          result = await mainPool.query('SELECT * FROM users WHERE email = $1 AND password = $2', [email, password]);
         }
 
         if (result.rows.length > 0) {
@@ -233,23 +314,23 @@ async function startServer() {
     const { name, email, password, role, aadhar, phone, referredBy } = req.body;
 
     try {
-      if (isDbConnected) {
-        const existing = await pool.query('SELECT * FROM users WHERE aadhar = $1 OR email = $2', [aadhar, email]);
+      if (isMainDbConnected) {
+        const existing = await mainPool.query('SELECT * FROM users WHERE aadhar = $1 OR email = $2', [aadhar, email]);
         if (existing.rows.length > 0) {
           return res.status(400).json({ error: 'Malpractice detected: Account already exists with this Aadhar or Email.' });
         }
 
         const id = Math.random().toString(36).substr(2, 9);
         const referral_code = 'AVG' + Math.floor(1000 + Math.random() * 9000);
-        const parentResult = await pool.query('SELECT * FROM users WHERE referral_code = $1', [referredBy]);
+        const parentResult = await mainPool.query('SELECT * FROM users WHERE referral_code = $1', [referredBy]);
         const parent = parentResult.rows[0];
 
-        await pool.query(`
+        await mainPool.query(`
           INSERT INTO users (id, name, email, password, role, aadhar, phone, referral_code, referred_by, parent_id)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         `, [id, name, email, password, role, aadhar, phone, referral_code, referredBy, parent?.id || null]);
 
-        const newUser = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+        const newUser = await mainPool.query('SELECT * FROM users WHERE id = $1', [id]);
         res.json(newUser.rows[0]);
       } else {
         const existing = memoryStore.users.find((u: any) => u.aadhar === aadhar || u.email === email);
@@ -270,8 +351,8 @@ async function startServer() {
 
   app.get('/api/users', async (req, res) => {
     try {
-      if (isDbConnected) {
-        const result = await pool.query('SELECT * FROM users');
+      if (isMainDbConnected) {
+        const result = await mainPool.query('SELECT * FROM users');
         res.json(result.rows);
       } else {
         res.json(memoryStore.users);
@@ -284,14 +365,14 @@ async function startServer() {
   app.post('/api/users', async (req, res) => {
     const { name, email, password, role, aadhar, phone, referred_by, parent_id } = req.body;
     try {
-      if (isDbConnected) {
-        const existing = await pool.query('SELECT * FROM users WHERE aadhar = $1 OR email = $2', [aadhar, email]);
+      if (isMainDbConnected) {
+        const existing = await mainPool.query('SELECT * FROM users WHERE aadhar = $1 OR email = $2', [aadhar, email]);
         if (existing.rows.length > 0) {
           return res.status(400).json({ error: 'Malpractice detected: Account already exists with this Aadhar or Email.' });
         }
         const id = Math.random().toString(36).substr(2, 9);
         const referral_code = 'AVG' + Math.floor(1000 + Math.random() * 9000);
-        await pool.query(`
+        await mainPool.query(`
           INSERT INTO users (id, name, email, password, role, aadhar, phone, referral_code, referred_by, parent_id)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         `, [id, name, email, password, role, aadhar, phone, referral_code, referred_by || null, parent_id || null]);
@@ -310,8 +391,8 @@ async function startServer() {
   app.put('/api/users/:id', async (req, res) => {
     const { name, email, role, aadhar, phone } = req.body;
     try {
-      if (isDbConnected) {
-        await pool.query('UPDATE users SET name = $1, email = $2, role = $3, aadhar = $4, phone = $5 WHERE id = $6', 
+      if (isMainDbConnected) {
+        await mainPool.query('UPDATE users SET name = $1, email = $2, role = $3, aadhar = $4, phone = $5 WHERE id = $6', 
           [name, email, role, aadhar, phone, req.params.id]);
       } else {
         const index = memoryStore.users.findIndex((u: any) => u.id === req.params.id);
@@ -328,14 +409,14 @@ async function startServer() {
   app.post('/api/users/:id/password', async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     try {
-      const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+      const result = await mainPool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
       const user = result.rows[0];
       
       if (!user || user.password !== currentPassword) {
         return res.status(401).json({ error: 'Incorrect current password' });
       }
 
-      await pool.query('UPDATE users SET password = $1 WHERE id = $2', [newPassword, req.params.id]);
+      await mainPool.query('UPDATE users SET password = $1 WHERE id = $2', [newPassword, req.params.id]);
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: 'Failed to update password' });
@@ -344,8 +425,8 @@ async function startServer() {
 
   app.delete('/api/users/:id', async (req, res) => {
     try {
-      if (isDbConnected) {
-        await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+      if (isMainDbConnected) {
+        await mainPool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
       } else {
         memoryStore.users = memoryStore.users.filter((u: any) => u.id !== req.params.id);
       }
@@ -357,8 +438,8 @@ async function startServer() {
 
   app.get('/api/projects', async (req, res) => {
     try {
-      if (isDbConnected) {
-        const result = await pool.query('SELECT * FROM projects ORDER BY created_at DESC');
+      if (isMainDbConnected) {
+        const result = await mainPool.query('SELECT * FROM projects ORDER BY created_at DESC');
         res.json(result.rows);
       } else {
         res.json(memoryStore.projects);
@@ -372,8 +453,8 @@ async function startServer() {
     const { title, description, category, budget } = req.body;
     const id = 'p' + Math.random().toString(36).substr(2, 5);
     try {
-      if (isDbConnected) {
-        await pool.query('INSERT INTO projects (id, title, description, category, budget) VALUES ($1, $2, $3, $4, $5)', 
+      if (isMainDbConnected) {
+        await mainPool.query('INSERT INTO projects (id, title, description, category, budget) VALUES ($1, $2, $3, $4, $5)', 
           [id, title, description, category, budget]);
       } else {
         memoryStore.projects.push({ id, title, description, category, budget, status: 'Active' });
@@ -387,8 +468,8 @@ async function startServer() {
   app.put('/api/projects/:id', async (req, res) => {
     const { title, description, category, budget } = req.body;
     try {
-      if (isDbConnected) {
-        await pool.query('UPDATE projects SET title = $1, description = $2, category = $3, budget = $4 WHERE id = $5', 
+      if (isMainDbConnected) {
+        await mainPool.query('UPDATE projects SET title = $1, description = $2, category = $3, budget = $4 WHERE id = $5', 
           [title, description, category, budget, req.params.id]);
       } else {
         const index = memoryStore.projects.findIndex((p: any) => p.id === req.params.id);
@@ -404,8 +485,8 @@ async function startServer() {
 
   app.delete('/api/projects/:id', async (req, res) => {
     try {
-      if (isDbConnected) {
-        await pool.query('DELETE FROM projects WHERE id = $1', [req.params.id]);
+      if (isMainDbConnected) {
+        await mainPool.query('DELETE FROM projects WHERE id = $1', [req.params.id]);
       } else {
         memoryStore.projects = memoryStore.projects.filter((p: any) => p.id !== req.params.id);
       }
@@ -417,8 +498,8 @@ async function startServer() {
 
   app.get('/api/money-tracking', async (req, res) => {
     try {
-      if (isDbConnected) {
-        const result = await pool.query(`
+      if (isMainDbConnected) {
+        const result = await mainPool.query(`
           SELECT mt.*, u.name as user_name 
           FROM money_tracking mt 
           JOIN users u ON mt.user_id = u.id 
@@ -441,8 +522,8 @@ async function startServer() {
     const { user_id, amount, currency, description, type } = req.body;
     const id = 'mt' + Math.random().toString(36).substr(2, 5);
     try {
-      if (isDbConnected) {
-        await pool.query('INSERT INTO money_tracking (id, user_id, amount, currency, description, type) VALUES ($1, $2, $3, $4, $5, $6)', 
+      if (isMainDbConnected) {
+        await mainPool.query('INSERT INTO money_tracking (id, user_id, amount, currency, description, type) VALUES ($1, $2, $3, $4, $5, $6)', 
           [id, user_id, amount, currency, description, type]);
       } else {
         memoryStore.money_tracking.push({ id, user_id, amount, currency, description, type, date: new Date().toISOString() });
@@ -456,8 +537,8 @@ async function startServer() {
   app.put('/api/money-tracking/:id', async (req, res) => {
     const { amount, currency, description, type } = req.body;
     try {
-      if (isDbConnected) {
-        await pool.query('UPDATE money_tracking SET amount = $1, currency = $2, description = $3, type = $4 WHERE id = $5', 
+      if (isMainDbConnected) {
+        await mainPool.query('UPDATE money_tracking SET amount = $1, currency = $2, description = $3, type = $4 WHERE id = $5', 
           [amount, currency, description, type, req.params.id]);
       } else {
         const index = memoryStore.money_tracking.findIndex((m: any) => m.id === req.params.id);
@@ -473,8 +554,8 @@ async function startServer() {
 
   app.delete('/api/money-tracking/:id', async (req, res) => {
     try {
-      if (isDbConnected) {
-        await pool.query('DELETE FROM money_tracking WHERE id = $1', [req.params.id]);
+      if (isMainDbConnected) {
+        await mainPool.query('DELETE FROM money_tracking WHERE id = $1', [req.params.id]);
       } else {
         memoryStore.money_tracking = memoryStore.money_tracking.filter((m: any) => m.id !== req.params.id);
       }
@@ -486,8 +567,8 @@ async function startServer() {
 
   app.get('/api/visits', async (req, res) => {
     try {
-      if (isDbConnected) {
-        const result = await pool.query(`
+      if (isMainDbConnected) {
+        const result = await mainPool.query(`
           SELECT cv.*, u_so.name as so_name, u_client.name as client_name 
           FROM client_visits cv
           JOIN users u_so ON cv.so_id = u_so.id
@@ -510,8 +591,8 @@ async function startServer() {
 
   app.get('/api/branches', async (req, res) => {
     try {
-      if (isDbConnected) {
-        const result = await pool.query('SELECT * FROM branches ORDER BY total_collection DESC');
+      if (isMainDbConnected) {
+        const result = await mainPool.query('SELECT * FROM branches ORDER BY total_collection DESC');
         res.json(result.rows);
       } else {
         res.json([...memoryStore.branches].sort((a, b) => b.total_collection - a.total_collection));
@@ -525,8 +606,8 @@ async function startServer() {
     const { name, bm_name, total_collection } = req.body;
     const id = 'b' + Math.random().toString(36).substr(2, 5);
     try {
-      if (isDbConnected) {
-        await pool.query('INSERT INTO branches (id, name, bm_name, total_collection) VALUES ($1, $2, $3, $4)', 
+      if (isMainDbConnected) {
+        await mainPool.query('INSERT INTO branches (id, name, bm_name, total_collection) VALUES ($1, $2, $3, $4)', 
           [id, name, bm_name, total_collection]);
       } else {
         memoryStore.branches.push({ id, name, bm_name, total_collection });
@@ -540,7 +621,7 @@ async function startServer() {
   app.put('/api/branches/:id', async (req, res) => {
     const { name, bm_name, total_collection } = req.body;
     try {
-      await pool.query('UPDATE branches SET name = $1, bm_name = $2, total_collection = $3 WHERE id = $4', 
+      await mainPool.query('UPDATE branches SET name = $1, bm_name = $2, total_collection = $3 WHERE id = $4', 
         [name, bm_name, total_collection, req.params.id]);
       res.json({ success: true });
     } catch (err) {
@@ -550,7 +631,7 @@ async function startServer() {
 
   app.delete('/api/branches/:id', async (req, res) => {
     try {
-      await pool.query('DELETE FROM branches WHERE id = $1', [req.params.id]);
+      await mainPool.query('DELETE FROM branches WHERE id = $1', [req.params.id]);
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: 'Failed to delete branch' });
@@ -561,8 +642,8 @@ async function startServer() {
     const { so_id, client_id, notes } = req.body;
     const id = 'v' + Math.random().toString(36).substr(2, 5);
     try {
-      if (isDbConnected) {
-        await pool.query('INSERT INTO client_visits (id, so_id, client_id, notes) VALUES ($1, $2, $3, $4)', 
+      if (isMainDbConnected) {
+        await mainPool.query('INSERT INTO client_visits (id, so_id, client_id, notes) VALUES ($1, $2, $3, $4)', 
           [id, so_id, client_id, notes]);
       } else {
         memoryStore.client_visits.push({ id, so_id, client_id, notes, visit_date: new Date().toISOString() });
@@ -570,6 +651,146 @@ async function startServer() {
       res.json({ success: true, id });
     } catch (err) {
       res.status(500).json({ error: 'Failed to add visit' });
+    }
+  });
+
+  // ============ NEW SUBSIDIARY DATABASE API ROUTES ============
+
+  // Get all subsidiary branches
+  app.get('/api/subsidiary/branches', async (req, res) => {
+    try {
+      if (isSubsidiaryDbConnected) {
+        const result = await subsidiaryPool.query('SELECT * FROM subsidiary_branches ORDER BY created_at DESC');
+        res.json(result.rows);
+      } else {
+        res.json(memoryStore.subsidiary_data);
+      }
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch subsidiary branches' });
+    }
+  });
+
+  // Add subsidiary branch
+  app.post('/api/subsidiary/branches', async (req, res) => {
+    const { name, location, revenue, expenses, profit } = req.body;
+    const id = 'sub' + Math.random().toString(36).substr(2, 5);
+    try {
+      if (isSubsidiaryDbConnected) {
+        await subsidiaryPool.query(
+          'INSERT INTO subsidiary_branches (id, name, location, revenue, expenses, profit) VALUES ($1, $2, $3, $4, $5, $6)', 
+          [id, name, location, revenue || 0, expenses || 0, profit || 0]
+        );
+        res.json({ success: true, id });
+      } else {
+        memoryStore.subsidiary_data.push({ 
+          id, name, location, 
+          revenue: revenue || 0, 
+          expenses: expenses || 0, 
+          profit: profit || 0 
+        });
+        res.json({ success: true, id });
+      }
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to add subsidiary branch' });
+    }
+  });
+
+  // Update subsidiary branch
+  app.put('/api/subsidiary/branches/:id', async (req, res) => {
+    const { name, location, revenue, expenses, profit } = req.body;
+    try {
+      if (isSubsidiaryDbConnected) {
+        await subsidiaryPool.query(
+          'UPDATE subsidiary_branches SET name = $1, location = $2, revenue = $3, expenses = $4, profit = $5 WHERE id = $6',
+          [name, location, revenue, expenses, profit, req.params.id]
+        );
+      } else {
+        const index = memoryStore.subsidiary_data.findIndex((s: any) => s.id === req.params.id);
+        if (index !== -1) {
+          memoryStore.subsidiary_data[index] = { 
+            ...memoryStore.subsidiary_data[index], 
+            name, location, revenue, expenses, profit 
+          };
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update subsidiary branch' });
+    }
+  });
+
+  // Delete subsidiary branch
+  app.delete('/api/subsidiary/branches/:id', async (req, res) => {
+    try {
+      if (isSubsidiaryDbConnected) {
+        await subsidiaryPool.query('DELETE FROM subsidiary_branches WHERE id = $1', [req.params.id]);
+      } else {
+        memoryStore.subsidiary_data = memoryStore.subsidiary_data.filter((s: any) => s.id !== req.params.id);
+      }
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to delete subsidiary branch' });
+    }
+  });
+
+  // Get subsidiary statistics
+  app.get('/api/subsidiary/stats', async (req, res) => {
+    try {
+      if (isSubsidiaryDbConnected) {
+        const result = await subsidiaryPool.query(`
+          SELECT 
+            COUNT(*) as total_branches,
+            SUM(revenue) as total_revenue,
+            SUM(expenses) as total_expenses,
+            SUM(profit) as total_profit
+          FROM subsidiary_branches
+        `);
+        res.json(result.rows[0]);
+      } else {
+        const stats = memoryStore.subsidiary_data.reduce((acc: any, curr: any) => {
+          acc.total_branches = (acc.total_branches || 0) + 1;
+          acc.total_revenue = (acc.total_revenue || 0) + (curr.revenue || 0);
+          acc.total_expenses = (acc.total_expenses || 0) + (curr.expenses || 0);
+          acc.total_profit = (acc.total_profit || 0) + (curr.profit || 0);
+          return acc;
+        }, {});
+        res.json(stats);
+      }
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch subsidiary stats' });
+    }
+  });
+
+  // Cross-database query (combine main and subsidiary data)
+  app.get('/api/combined/branch-performance', async (req, res) => {
+    try {
+      let mainBranches = [];
+      let subsidiaryBranches = [];
+
+      // Get main branches
+      if (isMainDbConnected) {
+        const result = await mainPool.query('SELECT id, name, bm_name, total_collection FROM branches');
+        mainBranches = result.rows;
+      } else {
+        mainBranches = memoryStore.branches;
+      }
+
+      // Get subsidiary branches
+      if (isSubsidiaryDbConnected) {
+        const result = await subsidiaryPool.query('SELECT id, name, location, revenue, profit FROM subsidiary_branches');
+        subsidiaryBranches = result.rows;
+      } else {
+        subsidiaryBranches = memoryStore.subsidiary_data;
+      }
+
+      res.json({
+        main_branches: mainBranches,
+        subsidiary_branches: subsidiaryBranches,
+        total_main_collection: mainBranches.reduce((sum, b) => sum + (b.total_collection || 0), 0),
+        total_subsidiary_revenue: subsidiaryBranches.reduce((sum, b) => sum + (b.revenue || 0), 0)
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch combined data' });
     }
   });
 
@@ -589,6 +810,16 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    console.log('\n📊 Available API Endpoints:');
+    console.log('   Main Database:');
+    console.log('   - GET /api/branches');
+    console.log('   - GET /api/projects');
+    console.log('   - GET /api/users');
+    console.log('\n   Subsidiary Database:');
+    console.log('   - GET /api/subsidiary/branches');
+    console.log('   - GET /api/subsidiary/stats');
+    console.log('\n   Combined Data:');
+    console.log('   - GET /api/combined/branch-performance');
   });
 }
 
