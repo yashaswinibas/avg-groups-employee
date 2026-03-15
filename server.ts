@@ -6,20 +6,47 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Enhanced PostgreSQL connection with Railway support
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Fallback for individual variables if needed
+  // Fallback for individual variables if DATABASE_URL is not provided
   host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT || '5432'),
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  // SSL configuration for Railway (requires SSL)
+  ssl: process.env.NODE_ENV === 'production' ? {
+    rejectUnauthorized: false // Required for Railway's self-signed certificates
+  } : false,
+  // Connection pool settings for better performance
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
+
+// Test database connection with retry logic
+async function testDatabaseConnection(retries = 3): Promise<boolean> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const client = await pool.connect();
+      console.log(`✅ Database connection attempt ${i + 1}: SUCCESS`);
+      client.release();
+      return true;
+    } catch (err) {
+      console.error(`❌ Database connection attempt ${i + 1} failed:`, err instanceof Error ? err.message : err);
+      if (i < retries - 1) {
+        console.log(`Retrying in 2 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+  }
+  return false;
+}
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000; // Railway provides PORT env variable
 
   app.use(express.json());
 
@@ -88,11 +115,15 @@ async function startServer() {
   memoryStore.projects = [...seedProjects];
   memoryStore.branches = [...seedBranches];
 
+  // Check database configuration
   if (!dbUrl && !dbHost) {
     console.warn('\n' + '='.repeat(50));
     console.warn('⚠️  DATABASE NOT CONFIGURED');
     console.warn('Running in DEMO MODE with in-memory data.');
-    console.warn('To connect PostgreSQL: Add DATABASE_URL in Settings.');
+    console.warn('To connect PostgreSQL on Railway:');
+    console.warn('1. Go to Railway dashboard');
+    console.warn('2. Copy your DATABASE_URL');
+    console.warn('3. Add it to your environment variables');
     console.warn('='.repeat(50) + '\n');
   } else if (dbHost === 'host' || dbHost === 'base' || (dbUrl && (dbUrl.includes('@host') || dbUrl.includes('@base')))) {
     console.warn('\n' + '='.repeat(50));
@@ -101,94 +132,127 @@ async function startServer() {
     console.warn('Please provide a real DATABASE_URL in Settings.');
     console.warn('='.repeat(50) + '\n');
   } else {
-    try {
-      console.log(`🔌 Connecting to PostgreSQL...`);
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          email TEXT UNIQUE NOT NULL,
-          password TEXT NOT NULL,
-          role TEXT NOT NULL,
-          aadhar TEXT UNIQUE NOT NULL,
-          phone TEXT,
-          referral_code TEXT UNIQUE NOT NULL,
-          referred_by TEXT,
-          parent_id TEXT,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS projects (
-          id TEXT PRIMARY KEY,
-          title TEXT NOT NULL,
-          description TEXT,
-          category TEXT,
-          budget TEXT,
-          status TEXT DEFAULT 'Active',
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS money_tracking (
-          id TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          amount REAL NOT NULL,
-          currency TEXT DEFAULT 'INR',
-          description TEXT,
-          type TEXT NOT NULL,
-          date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS client_visits (
-          id TEXT PRIMARY KEY,
-          so_id TEXT NOT NULL,
-          client_id TEXT NOT NULL,
-          notes TEXT,
-          visit_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS branches (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          bm_name TEXT NOT NULL,
-          total_collection REAL DEFAULT 0,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      for (const u of seedUsers) {
+    // Test the connection
+    isDbConnected = await testDatabaseConnection();
+    
+    if (isDbConnected) {
+      try {
+        console.log(`🔌 Creating database tables...`);
+        
+        // Create tables if they don't exist
         await pool.query(`
-          INSERT INTO users (id, name, email, password, role, aadhar, phone, referral_code, referred_by, parent_id)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-          ON CONFLICT (id) DO NOTHING
-        `, [u.id, u.name, u.email, u.password, u.role, u.aadhar, u.phone, u.referral_code, u.referred_by, u.parent_id]);
-      }
+          CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            aadhar TEXT UNIQUE NOT NULL,
+            phone TEXT,
+            referral_code TEXT UNIQUE NOT NULL,
+            referred_by TEXT,
+            parent_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
 
-      for (const p of seedProjects) {
-        await pool.query(`
-          INSERT INTO projects (id, title, description, category, budget)
-          VALUES ($1, $2, $3, $4, $5)
-          ON CONFLICT (id) DO NOTHING
-        `, [p.id, p.title, p.description, p.category, p.budget]);
-      }
+          CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            category TEXT,
+            budget TEXT,
+            status TEXT DEFAULT 'Active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
 
-      for (const b of seedBranches) {
-        await pool.query(`
-          INSERT INTO branches (id, name, bm_name, total_collection)
-          VALUES ($1, $2, $3, $4)
-          ON CONFLICT (id) DO NOTHING
-        `, [b.id, b.name, b.bm_name, b.total_collection]);
+          CREATE TABLE IF NOT EXISTS money_tracking (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            amount REAL NOT NULL,
+            currency TEXT DEFAULT 'INR',
+            description TEXT,
+            type TEXT NOT NULL,
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE IF NOT EXISTS client_visits (
+            id TEXT PRIMARY KEY,
+            so_id TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            notes TEXT,
+            visit_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (so_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (client_id) REFERENCES users(id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE IF NOT EXISTS branches (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            bm_name TEXT NOT NULL,
+            total_collection REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+
+          -- Create indexes for better performance
+          CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+          CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code);
+          CREATE INDEX IF NOT EXISTS idx_money_user ON money_tracking(user_id);
+          CREATE INDEX IF NOT EXISTS idx_visits_so ON client_visits(so_id);
+          CREATE INDEX IF NOT EXISTS idx_visits_client ON client_visits(client_id);
+        `);
+
+        // Insert seed data if tables are empty
+        const userCount = await pool.query('SELECT COUNT(*) FROM users');
+        if (parseInt(userCount.rows[0].count) === 0) {
+          console.log('🌱 Seeding initial data...');
+          
+          // Insert seed users
+          for (const u of seedUsers) {
+            await pool.query(`
+              INSERT INTO users (id, name, email, password, role, aadhar, phone, referral_code, referred_by, parent_id)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+              ON CONFLICT (id) DO NOTHING
+            `, [u.id, u.name, u.email, u.password, u.role, u.aadhar, u.phone, u.referral_code, u.referred_by, u.parent_id]);
+          }
+
+          // Insert seed projects
+          for (const p of seedProjects) {
+            await pool.query(`
+              INSERT INTO projects (id, title, description, category, budget)
+              VALUES ($1, $2, $3, $4, $5)
+              ON CONFLICT (id) DO NOTHING
+            `, [p.id, p.title, p.description, p.category, p.budget]);
+          }
+
+          // Insert seed branches
+          for (const b of seedBranches) {
+            await pool.query(`
+              INSERT INTO branches (id, name, bm_name, total_collection)
+              VALUES ($1, $2, $3, $4)
+              ON CONFLICT (id) DO NOTHING
+            `, [b.id, b.name, b.bm_name, b.total_collection]);
+          }
+        }
+
+        console.log('\n' + '='.repeat(50));
+        console.log('✅ RAILWAY POSTGRESQL CONNECTED SUCCESSFULLY');
+        console.log('Application is now using your production database on Railway.');
+        console.log('='.repeat(50) + '\n');
+      } catch (err) {
+        console.error('\n' + '='.repeat(50));
+        console.error('❌ DATABASE INITIALIZATION FAILED');
+        console.error('Error:', err instanceof Error ? err.message : err);
+        console.error('Falling back to DEMO MODE.');
+        console.error('='.repeat(50) + '\n');
+        isDbConnected = false;
       }
-      isDbConnected = true;
-      console.log('\n' + '='.repeat(50));
-      console.log('✅ POSTGRESQL CONNECTED SUCCESSFULLY');
-      console.log('Application is now using your live database.');
-      console.log('='.repeat(50) + '\n');
-    } catch (err) {
-      console.error('\n' + '='.repeat(50));
-      console.error('❌ DATABASE CONNECTION FAILED');
-      console.error('Falling back to DEMO MODE.');
-      console.error('Error:', err instanceof Error ? err.message : err);
-      console.error('='.repeat(50) + '\n');
+    } else {
+      console.warn('\n' + '='.repeat(50));
+      console.warn('⚠️  DATABASE CONNECTION FAILED');
+      console.warn('Running in DEMO MODE with in-memory data.');
+      console.warn('Please check your Railway database credentials.');
+      console.warn('='.repeat(50) + '\n');
     }
   }
 
@@ -328,6 +392,9 @@ async function startServer() {
   app.post('/api/users/:id/password', async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     try {
+      if (!isDbConnected) {
+        return res.status(503).json({ error: 'Password change requires database connection' });
+      }
       const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
       const user = result.rows[0];
       
@@ -540,8 +607,15 @@ async function startServer() {
   app.put('/api/branches/:id', async (req, res) => {
     const { name, bm_name, total_collection } = req.body;
     try {
-      await pool.query('UPDATE branches SET name = $1, bm_name = $2, total_collection = $3 WHERE id = $4', 
-        [name, bm_name, total_collection, req.params.id]);
+      if (isDbConnected) {
+        await pool.query('UPDATE branches SET name = $1, bm_name = $2, total_collection = $3 WHERE id = $4', 
+          [name, bm_name, total_collection, req.params.id]);
+      } else {
+        const index = memoryStore.branches.findIndex((b: any) => b.id === req.params.id);
+        if (index !== -1) {
+          memoryStore.branches[index] = { ...memoryStore.branches[index], name, bm_name, total_collection };
+        }
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: 'Failed to update branch' });
@@ -550,7 +624,11 @@ async function startServer() {
 
   app.delete('/api/branches/:id', async (req, res) => {
     try {
-      await pool.query('DELETE FROM branches WHERE id = $1', [req.params.id]);
+      if (isDbConnected) {
+        await pool.query('DELETE FROM branches WHERE id = $1', [req.params.id]);
+      } else {
+        memoryStore.branches = memoryStore.branches.filter((b: any) => b.id !== req.params.id);
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: 'Failed to delete branch' });
